@@ -16,6 +16,7 @@ import (
 	log "github.com/Sirupsen/logrus"
 	"github.com/deckarep/golang-set"
 	"github.com/docker/infrakit/pkg/spi/instance"
+	"github.com/docker/infrakit/pkg/template"
 	"github.com/docker/infrakit/pkg/types"
 	"github.com/nightlyone/lockfile"
 	"github.com/spf13/afero"
@@ -158,12 +159,21 @@ const (
 	VMGoogleCloud = TResourceType("google_compute_instance")
 
 	// VMSoftLayer is the resource type for softlayer
-	VMSoftLayer = TResourceType("softlayer_virtual_guest")
+	VMSoftLayer = TResourceType("ibmcloud_infra_virtual_guest")
+
+	// FSSoftLayer is the resource type for SoftLayer file storage
+	FSSoftLayer = TResourceType("ibmcloud_infra_file_storage")
+
+	// BSSoftLayer is the resource type for SoftLayer block storage
+	BSSoftLayer = TResourceType("ibmcloud_infra_block_storage")
 )
 
 var (
 	// VMTypes is a list of supported vm types.
 	VMTypes = []interface{}{VMAmazon, VMAzure, VMDigitalOcean, VMGoogleCloud, VMSoftLayer}
+
+	// StorageTypes is a list of supported storage types
+	StorageTypes = []interface{}{FSSoftLayer, BSSoftLayer}
 )
 
 // first returns the first entry.  This is based on our assumption that exactly one vm resource per file.
@@ -190,6 +200,25 @@ func FindVM(tf *TFormat) (vmType TResourceType, vmName TResourceName, properties
 		}
 	}
 	err = fmt.Errorf("not found")
+	return
+}
+
+// FindStorage finds the resource block representing the storage instance from the tf.json representation
+func FindStorage(tf *TFormat) (storageType TResourceType, storageName TResourceName, properties TResourceProperties, err error) {
+	if tf.Resource == nil {
+		err = fmt.Errorf("no resource section")
+		return
+	}
+
+	supported := mapset.NewSetFromSlice(StorageTypes)
+	for resourceType, objs := range tf.Resource {
+		if supported.Contains(resourceType) {
+			storageType = resourceType
+			storageName, properties = first(objs)
+			return
+		}
+	}
+
 	return
 }
 
@@ -294,7 +323,7 @@ func (p *plugin) optionalProcessHostname(vmType TResourceType, name TResourceNam
 	}
 
 	switch vmType {
-	case TResourceType("softlayer_virtual_guest"): // # list the platforms here
+	case TResourceType("ibmcloud_infra_virtual_guest"): // # list the platforms here
 	default:
 		return
 	}
@@ -319,12 +348,34 @@ func (p *plugin) optionalProcessHostname(vmType TResourceType, name TResourceNam
 
 // Provision creates a new instance based on the spec.
 func (p *plugin) Provision(spec instance.Spec) (*instance.ID, error) {
+	// use timestamp as instance id
+	name := p.ensureUniqueFile()
+
+	id := instance.ID(name)
+
+	fmt.Println("id: ", id)
+
+	// Replace the {{ .InstanceID }} with the actual id
+	t, err := template.NewTemplate("str://"+spec.Properties.String(), template.Options{})
+	//t, err := template.NewTemplateFromBytes(spec.Properties.Bytes(), "", template.Options{})
+	// If an error is returned just use the original spec.Properties
+	if err == nil {
+		rendered, err := t.Render(map[string]interface{}{"InstanceID": id})
+		if err == nil {
+			// now make the rendered view be the new spec.Properties
+			spec.Properties = types.AnyBytes([]byte(rendered))
+		} else {
+			fmt.Println("Error rendering template: ", err)
+		}
+	} else {
+		fmt.Println("Error creating new template: ", err)
+	}
 
 	// Because the format of the spec.Properties is simply the same tf.json
 	// we simply look for vm instance and merge in the tags, and user init, etc.
 
 	tf := TFormat{}
-	err := spec.Properties.Decode(&tf)
+	err = spec.Properties.Decode(&tf)
 	if err != nil {
 		return nil, err
 	}
@@ -338,10 +389,20 @@ func (p *plugin) Provision(spec instance.Spec) (*instance.ID, error) {
 		return nil, fmt.Errorf("no-vm-instance-in-spec")
 	}
 
-	// use timestamp as instance id
-	name := p.ensureUniqueFile()
+	storageType, storageName, storageProps, err := FindStorage(&tf)
+	if err != nil {
+		return nil, err
+	}
 
-	id := instance.ID(name)
+	var storageSpecified bool
+	if storageType != "" && storageName != "" {
+		storageSpecified = true
+	}
+
+	var sName string
+	if storageSpecified {
+		sName = fmt.Sprintf("%s-%s", storageName, name)
+	}
 
 	// set the tags.
 	// add a name
@@ -409,6 +470,16 @@ func (p *plugin) Provision(spec instance.Spec) (*instance.ID, error) {
 	case VMAmazon, VMDigitalOcean:
 		addUserData(properties, "user_data", base64.StdEncoding.EncodeToString([]byte(spec.Init)))
 	case VMSoftLayer:
+		// Need to prepend spec.Init with str://
+		t, err := template.NewTemplate("str://"+spec.Init, template.Options{})
+		// If an error comes back, just use the original spec.Init
+		if err == nil {
+			rendered, err := t.Render(map[string]interface{}{"InstanceID": id})
+			if err == nil {
+				// now make the rendered view be the new spec.Init
+				spec.Init = rendered
+			}
+		}
 		addUserData(properties, "user_metadata", spec.Init)
 	case VMAzure:
 		// os_profile.custom_data
@@ -427,6 +498,11 @@ func (p *plugin) Provision(spec instance.Spec) (*instance.ID, error) {
 	// Write the whole thing back out, after decorations and replacing the hostname with the generated hostname
 	delete(tf.Resource[vmType], vmName)
 	tf.Resource[vmType][TResourceName(name)] = properties
+
+	if storageSpecified {
+		delete(tf.Resource[storageType], storageName)
+		tf.Resource[storageType][TResourceName(sName)] = storageProps
+	}
 
 	buff, err := json.MarshalIndent(tf, "  ", "  ")
 	log.Debugln("provision", id, "data=", string(buff), "err=", err)
