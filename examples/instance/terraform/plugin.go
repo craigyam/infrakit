@@ -160,11 +160,20 @@ const (
 
 	// VMSoftLayer is the resource type for softlayer
 	VMSoftLayer = TResourceType("softlayer_virtual_guest")
+
+	// FSSoftLayer is the resource type for SoftLayer file storage
+	FSSoftLayer = TResourceType("softlayer_file_storage")
+
+	// BSSoftLayer is the resource type for SoftLayer block storage
+	BSSoftLayer = TResourceType("softlayer_block_storage")
 )
 
 var (
 	// VMTypes is a list of supported vm types.
 	VMTypes = []interface{}{VMAmazon, VMAzure, VMDigitalOcean, VMGoogleCloud, VMSoftLayer}
+
+	// StorageTypes is a list of supported storage types
+	StorageTypes = []interface{}{FSSoftLayer, BSSoftLayer}
 )
 
 // first returns the first entry.  This is based on our assumption that exactly one vm resource per file.
@@ -191,6 +200,25 @@ func FindVM(tf *TFormat) (vmType TResourceType, vmName TResourceName, properties
 		}
 	}
 	err = fmt.Errorf("not found")
+	return
+}
+
+// FindStorage finds the resource block representing the storage instance from the tf.json representation
+func FindStorage(tf *TFormat) (storageType TResourceType, storageName TResourceName, properties TResourceProperties, err error) {
+	if tf.Resource == nil {
+		err = fmt.Errorf("no resource section")
+		return
+	}
+
+	supported := mapset.NewSetFromSlice(StorageTypes)
+	for resourceType, objs := range tf.Resource {
+		if supported.Contains(resourceType) {
+			storageType = resourceType
+			storageName, properties = first(objs)
+			return
+		}
+	}
+
 	return
 }
 
@@ -362,6 +390,16 @@ func (p *plugin) Provision(spec instance.Spec) (*instance.ID, error) {
 		return nil, fmt.Errorf("no-vm-instance-in-spec")
 	}
 
+	storageType, storageName, storageProps, err := FindStorage(&tf)
+	if err != nil {
+		return nil, err
+	}
+
+	var storageSpecified bool
+	if storageType != "" && storageName != "" {
+		storageSpecified = true
+	}
+
 	// set the tags.
 	// add a name
 	if spec.Tags != nil {
@@ -447,6 +485,12 @@ func (p *plugin) Provision(spec instance.Spec) (*instance.ID, error) {
 	// Write the whole thing back out, after decorations and replacing the hostname with the generated hostname
 	delete(tf.Resource[vmType], vmName)
 	tf.Resource[vmType][TResourceName(name)] = properties
+
+	if storageSpecified {
+		// Write it back out with the instance id appended to the storage resource name
+		delete(tf.Resource[storageType], storageName)
+		tf.Resource[storageType][TResourceName(fmt.Sprintf("%s-%s", storageName, name))] = storageProps
+	}
 
 	buff, err := json.MarshalIndent(tf, "  ", "  ")
 	log.Debugln("provision", id, "data=", string(buff), "err=", err)
