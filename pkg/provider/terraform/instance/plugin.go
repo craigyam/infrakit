@@ -331,6 +331,8 @@ func (p *plugin) Validate(req *types.Any) error {
 // scanLocalFiles reads the filesystem and loads all tf.json and tf.json.new files
 func (p *plugin) scanLocalFiles() (map[TResourceType]map[TResourceName]TResourceProperties, error) {
 
+	fmt.Printf("========> In scanLocalFiles() %s", p.Dir)
+
 	vms := map[TResourceType]map[TResourceName]TResourceProperties{}
 
 	fs := &afero.Afero{Fs: p.fs}
@@ -338,7 +340,9 @@ func (p *plugin) scanLocalFiles() (map[TResourceType]map[TResourceName]TResource
 	err := fs.Walk(p.Dir,
 
 		func(path string, info os.FileInfo, err error) error {
+			log.Infoln("======> Looking for tf json files")
 			matches := tfFileRegex.FindStringSubmatch(info.Name())
+			log.Infoln("======> Matches: ", matches)
 
 			if len(matches) == 4 {
 				buff, err := ioutil.ReadFile(filepath.Join(p.Dir, info.Name()))
