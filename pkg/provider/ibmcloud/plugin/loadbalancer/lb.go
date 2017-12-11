@@ -210,6 +210,9 @@ func (l *ibmcloudlb) Publish(route loadbalancer.Route) (loadbalancer.Result, err
 	// InfraKit doesn't define a method, so default to round robin
 	lbMethod := "ROUNDROBIN"
 
+	// Default to SOURCE_IP session stickiness
+	lbStickiness := "SOURCE_IP"
+
 	// Build the array for the softlayer call with the new route
 	lbRoute := datatypes.Network_LBaaS_LoadBalancerProtocolConfiguration{
 		BackendPort:         &route.Port,
@@ -217,6 +220,7 @@ func (l *ibmcloudlb) Publish(route loadbalancer.Route) (loadbalancer.Result, err
 		FrontendProtocol:    stringPtr(strings.ToUpper(string(route.LoadBalancerProtocol))),
 		BackendProtocol:     stringPtr(strings.ToUpper(string(route.Protocol))),
 		LoadBalancingMethod: &lbMethod,
+		SessionType:         &lbStickiness,
 	}
 	if certID != 0 {
 		lbRoute.TlsCertificateId = &certID
